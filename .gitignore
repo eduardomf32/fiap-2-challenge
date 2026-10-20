@@ -1,0 +1,10 @@
+# Variáveis de ambiente (segurança)
+.env
+
+# Arquivos temporários e logs
+*.log
+.DS_Store
+
+# IDEs
+.idea/
+.vscode/

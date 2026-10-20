@@ -1,0 +1,163 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ./docker/init-db.sh:/docker-entrypoint-initdb.d/01-init-db.sh:ro
+      - ./auth-service/db/init.sql:/scripts/auth-init.sql:ro
+      - ./flag-service/db/init.sql:/scripts/flag-init.sql:ro
+      - ./targeting-service/db/init.sql:/scripts/targeting-init.sql:ro
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis-cache
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+  auth-service:
+    build:
+      context: ./auth-service
+      dockerfile: ../docker/Dockerfile.auth
+    container_name: auth-service
+    restart: unless-stopped
+    ports:
+      - "${AUTH_PORT:-8001}:${AUTH_PORT:-8001}"
+    environment:
+      PORT: "${AUTH_PORT:-8001}"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/auth_db?sslmode=disable"
+      MASTER_KEY: "${MASTER_KEY:-admin-secreto-123}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:${AUTH_PORT:-8001}/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  flag-service:
+    build:
+      context: ./flag-service
+      dockerfile: ../docker/Dockerfile.flag
+    container_name: flag-service
+    restart: unless-stopped
+    ports:
+      - "${FLAG_PORT:-8002}:${FLAG_PORT:-8002}"
+    environment:
+      PORT: "${FLAG_PORT:-8002}"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/flags_db"
+      AUTH_SERVICE_URL: "http://auth-service:${AUTH_PORT:-8001}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${FLAG_PORT:-8002}/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  targeting-service:
+    build:
+      context: ./targeting-service
+      dockerfile: ../docker/Dockerfile.targeting
+    container_name: targeting-service
+    restart: unless-stopped
+    ports:
+      - "${TARGETING_PORT:-8003}:${TARGETING_PORT:-8003}"
+    environment:
+      PORT: "${TARGETING_PORT:-8003}"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/targeting_db"
+      AUTH_SERVICE_URL: "http://auth-service:${AUTH_PORT:-8001}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${TARGETING_PORT:-8003}/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  evaluation-service:
+    build:
+      context: ./evaluation-service
+      dockerfile: ../docker/Dockerfile.evaluation
+    container_name: evaluation-service
+    restart: unless-stopped
+    ports:
+      - "${EVALUATION_PORT:-8004}:${EVALUATION_PORT:-8004}"
+    environment:
+      PORT: "${EVALUATION_PORT:-8004}"
+      REDIS_URL: "redis://redis:6379"
+      FLAG_SERVICE_URL: "http://flag-service:${FLAG_PORT:-8002}"
+      TARGETING_SERVICE_URL: "http://targeting-service:${TARGETING_PORT:-8003}"
+      SERVICE_API_KEY: "${SERVICE_API_KEY:-}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
+      AWS_SQS_URL: "${AWS_SQS_URL:-}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-dummy}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-dummy}"
+      AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
+    depends_on:
+      redis:
+        condition: service_healthy
+      flag-service:
+        condition: service_healthy
+      targeting-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:${EVALUATION_PORT:-8004}/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  analytics-service:
+    build:
+      context: ./analytics-service
+      dockerfile: ../docker/Dockerfile.analytics
+    container_name: analytics-service
+    restart: unless-stopped
+    ports:
+      - "${ANALYTICS_PORT:-8005}:${ANALYTICS_PORT:-8005}"
+    environment:
+      PORT: "${ANALYTICS_PORT:-8005}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
+      AWS_SQS_URL: "${AWS_SQS_URL:-https://sqs.us-east-1.amazonaws.com/123456789012/minha-fila}"
+      AWS_DYNAMODB_TABLE: "${AWS_DYNAMODB_TABLE:-ToggleMasterAnalytics}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-dummy}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-dummy}"
+      AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${ANALYTICS_PORT:-8005}/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_data:
+    name: fiap_challenge_postgres_data
+  redis_data:
+    name: fiap_challenge_redis_data
